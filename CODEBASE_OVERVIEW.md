@@ -56,3 +56,76 @@ This supports compact low-level representation for marker pairs.
 2. Inspect binary export format in `to_binary()` and validate packet layout with a hex dump.
 3. Build and load `tesa_packer.so`, then verify `pack_markers()` behavior against Python expectations.
 4. Refactor duplicated modules and add tests for round-trip compression/decompression and CRC integrity.
+
+## Step 1 Walkthrough (Concrete Trace)
+
+Below is a hand-trace for a simple sentence:
+
+`"hello world hello"`
+
+### A) `add_to_dictionary` effects during `compress`
+
+`compress()` splits into words: `['hello', 'world', 'hello']`.
+
+For each word:
+
+1. `add_to_dictionary('hello')`
+   - `frequency['hello']` becomes `1`
+   - phrase is new, so marker `S1` is assigned
+   - dictionaries now include `S1 -> hello`
+2. `add_to_dictionary('world')`
+   - `frequency['world']` becomes `1`
+   - phrase is new, so marker `S2` is assigned
+   - dictionaries now include `S2 -> world`
+3. `add_to_dictionary('hello')`
+   - `frequency['hello']` becomes `2`
+   - phrase already exists, so existing marker `S1` is reused
+
+Raw marker stream before numeric encoding: `['S1', 'S2', 'S1']`.
+
+### B) Marker-to-integer encoding in `compress`
+
+Stable markers (`S*`) are encoded as `id << 2`:
+
+- `S1 -> 1 << 2 = 4`
+- `S2 -> 2 << 2 = 8`
+- `S1 -> 1 << 2 = 4`
+
+Encoded stream before delta coding: `[4, 8, 4]`.
+
+### C) Delta coding in `compress`
+
+`compress()` keeps the first value, then stores differences:
+
+- first value: `4`
+- second delta: `8 - 4 = 4`
+- third delta: `4 - 8 = -4`
+
+Final compressed output: `[4, 4, -4]`.
+
+### D) Delta restoration in `decompress`
+
+`decompress()` reconstructs absolute values from deltas:
+
+- start: `4`
+- next: `4 + 4 = 8`
+- next: `8 + (-4) = 4`
+
+Restored encoded stream: `[4, 8, 4]`.
+
+### E) Integer-to-marker resolution in `decompress`
+
+For each restored integer `r`:
+
+- `marker_type = r & 0b11`
+- `marker_id = r >> 2`
+
+So:
+
+- `4` => type `0`, id `1` => lookup `S1` => `hello`
+- `8` => type `0`, id `2` => lookup `S2` => `world`
+- `4` => type `0`, id `1` => lookup `S1` => `hello`
+
+Final decompressed text: `"hello world hello"`.
+
+This trace is useful because it makes the key convention visible: the lower two bits store marker-type information, and the higher bits store the marker ID.
